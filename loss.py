@@ -100,18 +100,18 @@ def concat_box_prediction_layers(pred_cls, pred_reg):
 class PoseLoss(object):
     def __init__(self, gamma, alpha, anchor_sizes, anchor_strides, positive_num, positive_lambda,
                     loss_weight_cls, loss_weight_reg, internal_K, diameters, target_coder):
-        self.cls_loss_func = SigmoidFocalLoss(gamma, alpha)
+        self.cls_loss_func = SigmoidFocalLoss(gamma, alpha) # binary focal loss
         # self.centerness_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
         # self.matcher = Matcher(fg_iou_threshold, bg_iou_threshold, True)
-        self.anchor_sizes = anchor_sizes
-        self.anchor_strides = anchor_strides
-        self.positive_num = positive_num
-        self.positive_lambda = positive_lambda
-        self.loss_weight_cls = loss_weight_cls
-        self.loss_weight_reg = loss_weight_reg
-        self.internal_K = internal_K
-        self.target_coder = target_coder
-        self.diameters = diameters
+        self.anchor_sizes = anchor_sizes    # [32, 64, 128, 256, 512]
+        self.anchor_strides = anchor_strides    # [8, 16, 32, 64, 128]
+        self.positive_num = positive_num    # 10
+        self.positive_lambda = positive_lambda  # 1.0
+        self.loss_weight_cls = loss_weight_cls  # 0.01
+        self.loss_weight_reg = loss_weight_reg  # 0.1
+        self.internal_K = internal_K    # intrinsic
+        self.target_coder = target_coder    # encode/decode: offset <--> global box 
+        self.diameters = diameters  # diameter of model
 
     def ObjectSpaceLoss(self, pred, target_3D_in_camera_frame, cls_labels, anchors, weight=None):
         if not isinstance(self.diameters, torch.Tensor):
@@ -125,12 +125,12 @@ class PoseLoss(object):
         pred_xy = self.target_coder.decode(pred_filtered, anchors)
         # target_xy = self.target_coder.decode(target, anchors)
 
-        pred_xy = pred_xy.view(-1,2,8).transpose(1,2).contiguous().view(-1,2)
+        pred_xy = pred_xy.view(-1,2,8).transpose(1,2).contiguous().view(-1,2)   # (N, 2)
 
         # construct normalized 2d
-        B = torch.inverse(self.internal_K).mm(torch.cat((pred_xy.t(), torch.ones_like(pred_xy[:,0]).view(1,-1)), dim=0)).t()
+        B = torch.inverse(self.internal_K).mm(torch.cat((pred_xy.t(), torch.ones_like(pred_xy[:,0]).view(1,-1)), dim=0)).t()    # (N, 3)
         # compute projection matrices
-        P = torch.bmm(B.view(-1, 3, 1), B.view(-1, 1, 3)) / torch.bmm(B.view(-1, 1, 3), B.view(-1, 3, 1))
+        P = torch.bmm(B.view(-1, 3, 1), B.view(-1, 1, 3)) / torch.bmm(B.view(-1, 1, 3), B.view(-1, 3, 1))   # (N, 3, 3)
 
         target_3D_in_camera_frame = target_3D_in_camera_frame.view(-1, 3, 1)
         px = torch.bmm(P, target_3D_in_camera_frame)
@@ -148,80 +148,92 @@ class PoseLoss(object):
             return losses.sum()
 
     def prepare_targets(self, targets, anchors):
+        """
+        Arguments
+            targets: PoseAnnots
+            anchors: list[list[BoxList]]
+        Returns:
+            cls_ids: list[list[int]]: object id
+        """
         cls_labels = []
         reg_targets = []
         aux_raw_boxes = []
         aux_3D_in_camera_frame = []
-        level_cnt = len(anchors[0])
+        level_cnt = len(anchors[0]) # feature number in one image
         for im_i in range(len(targets)):
             pose_targets_per_im = targets[im_i]
+            # transform gt box to BoxList
             bbox_targets_per_im = pose_targets_per_im.to_object_boxlist()
             assert bbox_targets_per_im.mode == "xyxy"
-            bboxes_per_im = bbox_targets_per_im.bbox
-            labels_per_im = pose_targets_per_im.class_ids + 1
-            anchors_per_im = cat_boxlist(anchors[im_i])
-            num_gt = bboxes_per_im.shape[0]
-            assert(level_cnt == len(anchors[im_i]))
+            bboxes_per_im = bbox_targets_per_im.bbox    # gt
+            labels_per_im = pose_targets_per_im.class_ids + 1   # 0-indexed --> 1-indexed
+            anchors_per_im = cat_boxlist(anchors[im_i]) # list[BoxList] --> BoxList (N1 + N2 + ..., 4), aggregate all feature anchors to one unified anchorlist
+            num_gt = bboxes_per_im.shape[0] # number of objects in current image
+            assert(level_cnt == len(anchors[im_i])) # all images have same feature numbers
             # 
-            rotations_per_im = pose_targets_per_im.rotations
-            translations_per_im = pose_targets_per_im.translations
-            mask_per_im = pose_targets_per_im.mask
+            rotations_per_im = pose_targets_per_im.rotations # list
+            translations_per_im = pose_targets_per_im.translations  # list
+            mask_per_im = pose_targets_per_im.mask  # merged mask (H, W)
 
-            # 
+            # anchor size and stride per feature size
             anchor_sizes_per_level_interest = self.anchor_sizes[:level_cnt]
             anchor_strides_per_level_interst = self.anchor_strides[:level_cnt]
-            gt_object_sizes = bbox_targets_per_im.box_span()
+            gt_object_sizes = bbox_targets_per_im.box_span()    # get maximum of size (w or h) of bbox in current image
 
+            # number of anchors in each feature
             num_anchors_per_level = [len(anchors_per_level.bbox) for anchors_per_level in anchors[im_i]]
             
-            anchors_cx_per_im = (anchors_per_im.bbox[:, 2] + anchors_per_im.bbox[:, 0]) / 2.0
-            anchors_cy_per_im = (anchors_per_im.bbox[:, 3] + anchors_per_im.bbox[:, 1]) / 2.0
+            anchors_cx_per_im = (anchors_per_im.bbox[:, 2] + anchors_per_im.bbox[:, 0]) / 2.0   # (N, )
+            anchors_cy_per_im = (anchors_per_im.bbox[:, 3] + anchors_per_im.bbox[:, 1]) / 2.0   # (N, )
             anchors_cx_per_im = torch.clamp(anchors_cx_per_im, min = 0, max = mask_per_im.shape[1] - 1).long()
             anchors_cy_per_im = torch.clamp(anchors_cy_per_im, min = 0, max = mask_per_im.shape[0] - 1).long()
 
-            mask_at_anchors = mask_per_im[anchors_cy_per_im, anchors_cx_per_im]
+            mask_at_anchors = mask_per_im[anchors_cy_per_im, anchors_cx_per_im] # (N, )
             mask_labels = []
             for gt_i in range(num_gt):
-                valid_mask = (mask_at_anchors == (gt_i+1))
+                valid_mask = (mask_at_anchors == (gt_i+1))  # (N_anchors, )
                 mask_labels.append(valid_mask)
-            mask_labels = torch.stack(mask_labels).t()
+            mask_labels = torch.stack(mask_labels).t()  # (N_anchors, N_objs)
             mask_labels = mask_labels.long()
 
             # random selecting candidates from each level first
-            candidate_idxs = [[] for i in range(num_gt)]
+            candidate_idxs = [[] for i in range(num_gt)]    # [[] * num_gt] list of indices of anchor
+            # candidate_idxs[instance_id][i] = i_anchor; anchors_per_im[i_anchor] = (x1,y1,x2,y2)
             start_idx = 0
-            gt_sz = gt_object_sizes.view(1,-1).repeat(level_cnt,1)
-            lv_sz = torch.FloatTensor(anchor_sizes_per_level_interest).type_as(gt_sz)
-            lv_sz = lv_sz.view(-1,1).repeat(1,num_gt)
-            dk = torch.log2(gt_sz/lv_sz).abs()
-            nk = torch.exp(-self.positive_lambda * (dk * dk))
-            nk = self.positive_num * nk / nk.sum(0, keepdim=True)
+            gt_sz = gt_object_sizes.view(1,-1).repeat(level_cnt,1)  # (N_features, 1)
+            lv_sz = torch.FloatTensor(anchor_sizes_per_level_interest).type_as(gt_sz)   # feature size (N_features, )
+            lv_sz = lv_sz.view(-1,1).repeat(1,num_gt) # (N_features, N_objs)
+            dk = torch.log2(gt_sz/lv_sz).abs()  # delta_k, unnormalized probablities of each layer (N_features, N_objs)
+            nk = torch.exp(-self.positive_lambda * (dk * dk))   
+            nk = self.positive_num * nk / nk.sum(0, keepdim=True)   # N_k, number of each layer sampled of k'th layer (1, N_objs)
             nk = (nk + 0.5).int()
             for level in range(level_cnt):
+                # traverse from anchors in each layer
                 end_idx = start_idx + num_anchors_per_level[level]
-                is_in_mask_per_level = mask_labels[start_idx:end_idx, :]
+                is_in_mask_per_level = mask_labels[start_idx:end_idx, :]    # (N_anchor_cur_layer, N_objs)
                 # 
                 for gt_i in range(num_gt):
-                    posi_num = nk[level][gt_i]
+                    posi_num = nk[level][gt_i]  # prob
 
                     valid_pos = is_in_mask_per_level[:, gt_i].nonzero().view(-1)
-                    posi_num = min(posi_num, len(valid_pos))
+                    posi_num = min(posi_num, len(valid_pos))    # sampled feature number
                     # rand_idx = torch.randint(0, len(valid_pos), (int(posi_num),)) # randoms with replacement
                     rand_idx = torch.randperm(len(valid_pos))[:posi_num] # randoms without replacement
-                    candi_pos = valid_pos[rand_idx] + start_idx
+                    candi_pos = valid_pos[rand_idx] + start_idx # indices of chosen anchor
                     candidate_idxs[gt_i].append(candi_pos)
                 # 
                 start_idx = end_idx
 
             # flagging selected positions
-            roi = torch.full_like(mask_labels, -INF)
+            roi = torch.full_like(mask_labels, -INF) # (N_anchors, N_objs)
             for gt_i in range(num_gt):
-                tmp_idx = torch.cat(candidate_idxs[gt_i], dim=0)
+                tmp_idx = torch.cat(candidate_idxs[gt_i], dim=0)    # (N_anchor_samples, )
                 roi[tmp_idx, gt_i] = 1
 
-            anchors_to_gt_values, anchors_to_gt_indexs = roi.max(dim=1)
-            cls_labels_per_im = labels_per_im[anchors_to_gt_indexs]
-            cls_labels_per_im[anchors_to_gt_values == -INF] = 0 # background setting
+            # get all instance_ids of all selected anchors
+            anchors_to_gt_values, anchors_to_gt_indexs = roi.max(dim=1) # (N_anchors)
+            cls_labels_per_im = labels_per_im[anchors_to_gt_indexs] # instance_id --> cls_id
+            cls_labels_per_im[anchors_to_gt_values == -INF] = 0 # background setting, remove unvisible 
 
             mask_visibilities, _ = mask_labels.max(dim=1)
             # logical_and, introduced only after pytorch 1.5
@@ -229,9 +241,9 @@ class PoseLoss(object):
             ignored_indexs = (mask_visibilities == 1) * (cls_labels_per_im == 0)
             cls_labels_per_im[ignored_indexs] = -1 # positions within mask but not selected will not be touched
 
-            # 
-            matched_boxes = bboxes_per_im[anchors_to_gt_indexs]
-            matched_classes = (labels_per_im - 1)[anchors_to_gt_indexs]
+            # get all matched gt
+            matched_boxes = bboxes_per_im[anchors_to_gt_indexs] # (N_anchors, 4)
+            matched_classes = (labels_per_im - 1)[anchors_to_gt_indexs] # (N_anchors, 1)
             matched_rotations = rotations_per_im[anchors_to_gt_indexs]
             matched_translations = translations_per_im[anchors_to_gt_indexs]
 
@@ -242,6 +254,7 @@ class PoseLoss(object):
             # assert equals self K
             if not isinstance(self.internal_K, torch.Tensor):
                 self.internal_K = torch.FloatTensor(self.internal_K).to(device=matched_3Ds.device).view(3, 3)
+            # relative offset
             reg_targets_per_im = self.target_coder.encode(
                 self.internal_K, matched_3Ds, 
                 matched_rotations, matched_translations,
@@ -255,12 +268,21 @@ class PoseLoss(object):
         return cls_labels, reg_targets, aux_raw_boxes, aux_3D_in_camera_frame
 
     def __call__(self, pred_cls, pred_reg, targets, anchors):
+        """
+        Arguments:
+            pred_cls: (B, num_anchorsxnum_classes, H, W)
+            pred_reg: (B, num_anchorsxnum_classesx16, H, W)
+            targets: PoseAnnots
+            anchors: list[list[BoxList]]
+        """
+        # get selected labels ... meta
         labels, reg_targets, aux_raw_boxes, aux_3D_in_camera_frame = self.prepare_targets(targets, anchors)
 
         N = len(labels)
+        # permute to (B, N_anchors, C, H, W) --> (-1, C)
         pred_cls_flatten, pred_reg_flatten = concat_box_prediction_layers(pred_cls, pred_reg)
 
-        labels_flatten = torch.cat(labels, dim=0)
+        labels_flatten = torch.cat(labels, dim=0)   # (B, N_anchors, )
         reg_targets_flatten = torch.cat(reg_targets, dim=0)
         aux_raw_boxes_flatten = torch.cat(aux_raw_boxes, dim=0)
         aux_3D_in_camera_frame_flatten = torch.cat(aux_3D_in_camera_frame, dim=0)

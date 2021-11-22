@@ -34,7 +34,7 @@ class BOP_Dataset(Dataset):
         print("Number of samples: %d / %d" % (len(self.img_files), rawSampleCount))
         # 
         self.meshes, self.objID_2_clsID= load_bop_meshes(mesh_dir)
-        # 
+        # 3D keypoint 8
         self.bbox_3d = load_bbox_3d(bbox_json)
 
         self.transformer = transform
@@ -45,7 +45,7 @@ class BOP_Dataset(Dataset):
 
     def __getitem__(self, index):
         item = self.getitem1(index)
-        while item is None:
+        while item is None: # invalid item
             index = random.randint(0, len(self.img_files) - 1)
             item = self.getitem1(index)
         return item
@@ -95,7 +95,7 @@ class BOP_Dataset(Dataset):
 
         # transformation
         img, target = self.transformer(img, target)
-        target = target.remove_invalids(min_area = 10)
+        target = target.remove_invalids(min_area = 10)  # remove invalid object with limited area
         if self.training and len(target) == 0:
             # print("WARNING: skipped a sample without any targets")
             return None
