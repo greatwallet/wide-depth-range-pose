@@ -8,14 +8,14 @@ import cv2
 import numpy as np
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader, sampler
+from torch.utils.data import DataLoader, sampler, ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import transform
 from argument import get_args
 from backbone import darknet53
-from dataset import BOP_Dataset, collate_fn
+from dataset import BOP_Dataset_v1, collate_fn
 from distributed import (DistributedSampler, all_gather, get_rank,
                          reduce_loss_dict, synchronize)
 from evaluate import evaluate
@@ -61,7 +61,7 @@ def accumulate_dicts(data):
     return data
 
 @torch.no_grad()
-def valid(cfg, epoch, loader, model, device, logger=None):
+def valid(cfg, epoch, loader, model, device, prefix, logger=None):
     torch.cuda.empty_cache()
 
     model.eval()
@@ -86,7 +86,7 @@ def valid(cfg, epoch, loader, model, device, logger=None):
         if get_rank() == 0 and idx % 10 == 0:
             bIdx = 0
             imgpath, imgname = os.path.split(meta_infos[bIdx]['path'])
-            name_prefix = imgpath.replace(os.sep, '_').replace('.', '') + '_' + os.path.splitext(imgname)[0]
+            name_prefix = prefix + "_" + imgpath.replace(os.sep, '_').replace('.', '') + '_' + os.path.splitext(imgname)[0]
 
             rawImg, visImg, gtImg = visualize_pred(images.tensors[bIdx], targets[bIdx], pred[bIdx], 
                 cfg['INPUT']['PIXEL_MEAN'],  cfg['INPUT']['PIXEL_STD'], meshes)
@@ -123,8 +123,8 @@ def valid(cfg, epoch, loader, model, device, logger=None):
 
         for i in range(classNum):
             className = ('class_%02d' % i)
-            logger.add_scalars('ADI/' + className, accuracy_adi_per_class[i], epoch)
-            logger.add_scalars('REP/' + className, accuracy_rep_per_class[i], epoch)
+            logger.add_scalars(f'{prefix}/ADI/' + className, accuracy_adi_per_class[i], epoch)
+            logger.add_scalars(f'{prefix}/REP/' + className, accuracy_rep_per_class[i], epoch)
             # 
             assert(len(accuracy_adi_per_class[i]) == len(accuracy_rep_per_class[i]))
             if len(accuracy_adi_per_class[i]) > 0:
@@ -145,8 +145,8 @@ def valid(cfg, epoch, loader, model, device, logger=None):
             all_adi[key] = val / validClassNum
         for key, val in all_rep.items():
             all_rep[key] = val / validClassNum  
-        logger.add_scalars('ADI/all_class', all_adi, epoch)
-        logger.add_scalars('REP/all_class', all_rep, epoch)
+        logger.add_scalars(f'{prefix}/ADI/all_class', all_adi, epoch)
+        logger.add_scalars(f'{prefix}/REP/all_class', all_rep, epoch)
 
     return accuracy_adi_per_class, accuracy_rep_per_class, accuracy_adi_per_depth, accuracy_rep_per_depth, depth_range
 
@@ -252,25 +252,34 @@ if __name__ == '__main__':
         ]
     )
 
-    train_set = BOP_Dataset(
-        cfg['DATASETS']['TRAIN'], 
-        cfg['DATASETS']['MESH_DIR'], 
-        cfg['DATASETS']['BBOX_FILE'], 
-        train_trans,
-        cfg['SOLVER']['STEPS_PER_EPOCH'] * cfg['SOLVER']['IMS_PER_BATCH'],
-        training = True)
-    valid_set = BOP_Dataset(
-        cfg['DATASETS']['VALID'],
-        cfg['DATASETS']['MESH_DIR'], 
-        cfg['DATASETS']['BBOX_FILE'], 
-        valid_trans,
-        training = False)
+    train_set = ConcatDataset([
+        BOP_Dataset_v1(
+            dataDir=dataDir,
+            keypoint_json=cfg["DATASETS"]["KEYPOINT_FILE"],
+            transform=train_trans,
+            keypoint_type=cfg["DATASETS"]["KEYPOINT_TYPE"],
+            obj_ids=cfg["DATASETS"]["OBJ_IDS"],
+            samples_count=cfg['SOLVER']['STEPS_PER_EPOCH'] * cfg['SOLVER']['IMS_PER_BATCH'],
+            training=True
+        )
+        for dataDir in cfg["DATASETS"]["TRAIN"]   
+    ])
+    valid_sets= {
+        dataDir.split('/')[-2]: BOP_Dataset_v1(
+            dataDir=dataDir,
+            keypoint_json=cfg["DATASETS"]["KEYPOINT_FILE"],
+            keypoint_type=cfg["DATASETS"]["KEYPOINT_TYPE"],
+            obj_ids=cfg["DATASETS"]["OBJ_IDS"],
+            transform=valid_trans,
+            training=False
+        )
+        for dataDir in cfg["DATASETS"]["VALID"] 
+    }
 
     if cfg['MODEL']['BACKBONE'] == 'darknet53':
         backbone = darknet53(pretrained=True)
     else:
-        print("unsupported backbone!")
-        assert(0)
+        raise NotImplementedError("unsupported backbone!")
     model = PoseModule(cfg, backbone)
     model = model.to(device)
     start_epoch = 0
@@ -342,13 +351,18 @@ if __name__ == '__main__':
         num_workers=cfg['RUNTIME']['NUM_WORKERS'],
         collate_fn=collate_fn(cfg['INPUT']['SIZE_DIVISIBLE']),
     )
-    valid_loader = DataLoader(
-        valid_set,
-        batch_size=batch_size_per_gpu,
-        sampler=data_sampler(valid_set, shuffle=False, distributed=cfg['RUNTIME']['DISTRIBUTED']),
-        num_workers=cfg['RUNTIME']['NUM_WORKERS'],
-        collate_fn=collate_fn(cfg['INPUT']['SIZE_DIVISIBLE']),
-    )
+
+
+    valid_loaders = {
+        valset_name: DataLoader(
+            valid_set,
+            batch_size=batch_size_per_gpu,
+            sampler=data_sampler(valid_set, shuffle=False, distributed=cfg['RUNTIME']['DISTRIBUTED']),
+            num_workers=cfg['RUNTIME']['NUM_WORKERS'],
+            collate_fn=collate_fn(cfg['INPUT']['SIZE_DIVISIBLE']),
+        )
+        for valset_name, valid_set in valid_sets.items()
+    }
 
     # write cfg to working_dir
     with open(cfg['RUNTIME']['WORKING_DIR'] + 'cfg.json', 'w') as f:
@@ -357,7 +371,8 @@ if __name__ == '__main__':
     for epoch in range(start_epoch, max_epoch):
         train(cfg, epoch, max_epoch, train_loader, model, optimizer, scheduler_batch, device, logger=logger)
 
-        valid(cfg, epoch, valid_loader, model, device, logger=logger)
+        for valset_name, valid_loader in valid_loaders:
+            valid(cfg, epoch, valid_loader, model, device, prefix=valset_name, logger=logger)
 
         if get_rank() == 0:
             torch.save({

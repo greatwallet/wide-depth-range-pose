@@ -1,20 +1,19 @@
-import os
 import json
-import cv2
+import os
+import os.path as osp
 import random
-import numpy as np
 
-import torch
+import cv2
+import numpy as np
 from torch.utils.data import Dataset
 
-from boxlist import BoxList
 from poses import PoseAnnot
+from utils import get_single_bop_annotation, load_bbox_3d, load_bop_meshes
 
-from utils import (
-    load_bop_meshes,
-    load_bbox_3d,
-    get_single_bop_annotation
-)
+
+def is_img_file(fname):
+    EXTS = [".jpeg", ".png", ".jpg", ".bmp"]
+    return osp.splitext(fname)[-1].lower() in EXTS
 
 class BOP_Dataset(Dataset):
     def __init__(self, image_list_file, mesh_dir, bbox_json, transform, samples_count=0, training=True):
@@ -101,6 +100,107 @@ class BOP_Dataset(Dataset):
             return None
 
         return img, target, meta_info
+
+class BOP_Dataset_v1(Dataset):
+    """
+    Newly defined BOP dataset
+    """
+    def __init__(self, dataDir, keypoint_json, transform, keypoint_type, obj_ids, samples_count=0, training=True):
+        # List the data directory
+        self.img_files = []
+        for scene_dir in os.listdir(dataDir):
+            self.img_files.extend([
+                osp.join(dataDir, scene_dir, "rgb", img_file)
+                for img_file in os.listdir(osp.join(dataDir, scene_dir, "rgb"))
+                if is_img_file(img_file)
+            ])
+
+        rawSampleCount = len(self.img_files)
+        if training and samples_count > 0:
+            self.img_files = random.choices(self.img_files, k = samples_count)
+
+        if training:
+            random.shuffle(self.img_files)
+
+        print("Number of samples: %d / %d" % (len(self.img_files), rawSampleCount))
+        # 
+        self.meshes, self.objID_2_clsID = load_bop_meshes(osp.join(dataDir, "../models_eval"), obj_ids)
+        if obj_ids == "all":
+            obj_ids = list(self.objID_2_clsID.keys())
+
+        # 3D keypoint 8 TODO: format of bbox_3d
+        bbox_3d_meta = json.load(open(keypoint_json, 'r')) 
+        self.bbox_3d = [
+            bbox_3d_meta[obj_id][keypoint_type]
+            for obj_id in obj_ids
+        ]
+        self.obj_ids = obj_ids
+
+        self.transformer = transform
+        self.training = training
+
+    def __len__(self):
+        return len(self.img_files)
+
+    def __getitem__(self, index):
+        item = self.getitem1(index)
+        while item is None: # invalid item
+            index = random.randint(0, len(self.img_files) - 1)
+            item = self.getitem1(index)
+        return item
+
+    def getitem1(self, index):
+        img_path = self.img_files[index]
+
+        # Load image
+        try:
+            img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)  # BGR(A)
+            if img is None:
+                raise RuntimeError('load image error')
+            # 
+            if img.dtype == np.uint16:
+                img = cv2.convertScaleAbs(img, alpha=(255.0/65535.0)).astype(np.uint8)
+            # 
+            if len(img.shape) == 2:
+                # convert gray to 3 channels
+                img = np.repeat(img.reshape(img.shape[0], img.shape[1], 1), 3, axis=2)
+            # elif img.shape[2] == 3:
+            #     # add an alpha channel
+            #     img = np.concatenate((img, np.ones((img.shape[0], img.shape[1], 1), dtype=np.uint8)*255), axis=-1)
+            elif img.shape[2] == 4:
+                # having alpha
+                tmpBack = (img[:,:,3] == 0)
+                img[:,:,0:3][tmpBack] = 255 # white background
+        except:
+            print('image %s not found' % img_path)
+            return None
+
+        # Load labels (BOP format)
+        height, width, _ = img.shape
+        K, merged_mask, class_ids, rotations, translations = get_single_bop_annotation(img_path, self.objID_2_clsID, self.obj_ids)
+        
+        # get (raw) image meta info
+        meta_info = {
+            'path': img_path,
+            'K': K,
+            'width': width,
+            'height': height,
+            'class_ids': class_ids,
+            'rotations': rotations,
+            'translations': translations
+        }
+
+        target = PoseAnnot(self.bbox_3d, K, merged_mask, class_ids, rotations, translations, width, height)
+
+        # transformation
+        img, target = self.transformer(img, target)
+        target = target.remove_invalids(min_area=10)  # remove invalid object with limited area
+        if self.training and len(target) == 0:
+            # print("WARNING: skipped a sample without any targets")
+            return None
+
+        return img, target, meta_info
+
 
 class ImageList:
     def __init__(self, tensors, sizes):

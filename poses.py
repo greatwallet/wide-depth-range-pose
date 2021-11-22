@@ -1,19 +1,10 @@
-import torch
 import cv2
 import numpy as np
-import json
-import matplotlib.pyplot as plt
+import torch
 
 from boxlist import BoxList
+from utils import draw_bounding_box, draw_pose_axis, remap_pose
 
-from utils import (
-    generate_shiftscalerotate_matrix,
-    get_single_bop_annotation,
-    load_bop_meshes,
-    draw_bounding_box,
-    draw_pose_axis,
-    remap_pose,
-    )
 
 class PoseAnnot(object):
     """
@@ -98,7 +89,7 @@ class PoseAnnot(object):
 
         return cvImg
 
-    def remove_invalids(self, min_area=10):
+    def remove_invalids(self, min_area=10, valid_obj_ids=None):
         """
         check if segmentation masks have valid areas
         """
@@ -113,6 +104,9 @@ class PoseAnnot(object):
             area = tmpMask.sum()
             if area < min_area:
                 continue
+            if valid_obj_ids is not None:
+                if str(self.class_ids) not in valid_obj_ids:
+                    continue
             valid_idx.append(i)
             new_classids.append(self.class_ids[i])
             new_rotations.append(self.rotations[i])
@@ -150,12 +144,12 @@ class PoseAnnot(object):
 
     def to_tensor(self):
         poses = PoseAnnot(
-            torch.FloatTensor(self.keypoints_3d),
-            torch.FloatTensor(self.K),
-            torch.FloatTensor(self.mask),
-            torch.LongTensor(self.class_ids),
-            torch.FloatTensor(self.rotations),
-            torch.FloatTensor(self.translations),
+            torch.FloatTensor(np.asarray(self.keypoints_3d)),
+            torch.FloatTensor(np.asarray(self.K)),
+            torch.FloatTensor(np.asarray(self.mask)),
+            torch.LongTensor(np.asarray(self.class_ids)),
+            torch.FloatTensor(np.asarray(self.rotations)),
+            torch.FloatTensor(np.asarray(self.translations)),
             self.width, self.height
             )
         return poses

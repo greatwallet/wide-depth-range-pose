@@ -1,40 +1,23 @@
+import json
 import os
 import sys
 import time
-import json
 
-import torch
-from torch import nn, optim
-from torch.utils.data import DataLoader, sampler
-from tqdm import tqdm
-
-import numpy as np
 import cv2
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
+import transform
 from argument import get_args
 from backbone import darknet53
 from dataset import BOP_Dataset, collate_fn
+from distributed import get_rank, synchronize
 from model import PoseModule
-import transform
-from evaluate import evaluate
-from distributed import (
-    get_rank,
-    synchronize,
-    reduce_loss_dict,
-    DistributedSampler,
-    all_gather,
-)
-from train import (
-    accumulate_dicts,
-    valid,
-    data_sampler,
-)
-from utils import (
-    visualize_accuracy_per_depth,
-    print_accuracy_per_class,
-)
-
-from tensorboardX import SummaryWriter
+from train import data_sampler, valid
+from utils import visualize_accuracy_per_depth
 
 # reproducibility: https://pytorch.org/docs/stable/notes/randomness.html
 torch.manual_seed(0)

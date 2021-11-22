@@ -10,7 +10,7 @@ import numpy as np
 import cv2
 import torch
 
-def load_bop_meshes(model_path):
+def load_bop_meshes(model_path, obj_ids="all"):
     """
     Returns:
         meshes: list[Trimesh]
@@ -21,11 +21,16 @@ def load_bop_meshes(model_path):
     meshFiles.sort()
     meshes = []
     objID_2_clsID = {}
-    for i in range(len(meshFiles)):
-        mFile = meshFiles[i]
+    i = 0
+    for _i in range(len(meshFiles)):
+        mFile = meshFiles[_i]
         objId = int(os.path.splitext(mFile)[0][4:])
+        # skip non-selected objects
+        if isinstance(obj_ids, list) and str(objId) not in obj_ids:
+            continue
         objID_2_clsID[str(objId)] = i
-        meshes.append(trimesh.load(model_path + mFile))
+        meshes.append(trimesh.load(os.path.join(model_path, mFile)))
+        i += 1
         # print('mesh from "%s" is loaded' % (model_path + mFile))
     # 
     return meshes, objID_2_clsID
@@ -89,7 +94,7 @@ def draw_pose_axis(cvImg, R, T, bbox, intrinsics, thickness):
     cvImg = cv2.line(cvImg, (x[0],y[0]), (x[3],y[3]), (255,0,0), thickness=thickness, lineType=cv2.LINE_AA)
     return cvImg
 
-def get_single_bop_annotation(img_path, objID_2_clsID):
+def get_single_bop_annotation(img_path, objID_2_clsID, obj_ids=None):
     """
     Returns:
         K: camera intrinsic (3, 3)
@@ -156,6 +161,8 @@ def get_single_bop_annotation(img_path, objID_2_clsID):
         R = np.array(annot_poses[i]['cam_R_m2c']).reshape(3,3)
         T = np.array(annot_poses[i]['cam_t_m2c']).reshape(3,1)
         obj_id = str(annot_poses[i]['obj_id'])
+        if obj_ids is not None and obj_id not in obj_ids:
+            continue
         if not obj_id in objID_2_clsID:
             continue
         cls_id = objID_2_clsID[obj_id]

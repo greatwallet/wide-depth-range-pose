@@ -490,8 +490,8 @@ class PoseModule(nn.Module):
         super(PoseModule, self).__init__()
 
         n_class = cfg['DATASETS']['N_CLASS']            # 2
-        bbox_json = cfg['DATASETS']['BBOX_FILE']        # json meta
-        diameters = cfg['DATASETS']['MESH_DIAMETERS']   # 178.46
+        # bbox_json = cfg['DATASETS']['BBOX_FILE']        # json meta
+        diameters = cfg['DATASETS']['MESH_DIAMETERS']   # 
 
         n_conv = cfg['MODEL']['N_CONV']                 # 4
         prior = cfg['MODEL']['PRIOR']                   # 0.01
