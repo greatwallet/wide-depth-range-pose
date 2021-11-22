@@ -14,6 +14,10 @@ from postprocess import PostProcessor
 from utils import load_bbox_3d
 
 class Scale(nn.Module):
+    """
+    Scaling moule, multiply input by scale
+    scale are learnable coeficients
+    """
     def __init__(self, init_value=1.0):
         super().__init__()
 
@@ -40,7 +44,19 @@ def init_conv_std(module, std=0.01):
 
 
 class FPN(nn.Module):
-    def __init__(self, in_channels, out_channel, top_blocks=None):
+    def __init__(
+        self, 
+        in_channels: list[int], 
+        out_channel: int, 
+        top_blocks: nn.Module = None
+    ):
+        """
+        Feature Pyramid Networks
+
+        in_channels: input channels of each layer, if zero, not set for this layer; [0, 0, 256, 512, 1024]
+        out_channel: output layer; 256
+        top_blocks: FPNTopP6P7(1024, 256, use_p5=True)
+        """
         super().__init__()
 
         self.inner_convs = nn.ModuleList()
@@ -53,8 +69,8 @@ class FPN(nn.Module):
 
                 continue
 
-            inner_conv = nn.Conv2d(in_channel, out_channel, 1)
-            feat_conv = nn.Conv2d(out_channel, out_channel, 3, padding=1)
+            inner_conv = nn.Conv2d(in_channel, out_channel, 1)  # res x= 1
+            feat_conv = nn.Conv2d(out_channel, out_channel, 3, padding=1)   # res x= 1
 
             self.inner_convs.append(inner_conv)
             self.out_convs.append(feat_conv)
@@ -63,9 +79,13 @@ class FPN(nn.Module):
 
         self.top_blocks = top_blocks
 
-    def forward(self, inputs):
-        inner = self.inner_convs[-1](inputs[-1])
-        outs = [self.out_convs[-1](inner)]
+    def forward(self, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+        """
+        outs stride [(16, 8,) 4, 2, 1, (0.5, 0.25)] x feature.res
+        len(outs) = 5 
+        """
+        inner = self.inner_convs[-1](inputs[-1])    # last layer
+        outs = [self.out_convs[-1](inner)]          # last layer
 
         for feat, inner_conv, out_conv in zip(
             inputs[:-1][::-1], self.inner_convs[:-1][::-1], self.out_convs[:-1][::-1]
@@ -73,15 +93,15 @@ class FPN(nn.Module):
             if inner_conv is None:
                 continue
 
-            upsample = F.interpolate(inner, scale_factor=2, mode='nearest')
+            upsample = F.interpolate(inner, scale_factor=2, mode='nearest') # res x= 2
             inner_feat = inner_conv(feat)
             inner = inner_feat + upsample
-            outs.insert(0, out_conv(inner))
+            outs.insert(0, out_conv(inner)) # put at front
 
         if self.top_blocks is not None:
             top_outs = self.top_blocks(outs[-1], inputs[-1])
-            outs.extend(top_outs)
-
+            outs.extend(top_outs)   # the stride degrads with index increase
+        # outs stride [16, 8, 4, 2, 1, (0.5, 0.25)] x feature.res
         return outs
 
 
@@ -89,8 +109,8 @@ class FPNTopP6P7(nn.Module):
     def __init__(self, in_channel, out_channel, use_p5=True):
         super().__init__()
 
-        self.p6 = nn.Conv2d(in_channel, out_channel, 3, stride=2, padding=1)
-        self.p7 = nn.Conv2d(out_channel, out_channel, 3, stride=2, padding=1)
+        self.p6 = nn.Conv2d(in_channel, out_channel, 3, stride=2, padding=1)    # res x= 0.5
+        self.p7 = nn.Conv2d(out_channel, out_channel, 3, stride=2, padding=1)   # res x= 0.5
 
         self.apply(init_conv_kaiming)
 
@@ -107,10 +127,18 @@ class FPNTopP6P7(nn.Module):
 
 class TargetCoder(object):
     def __init__(self, anchor_sizes, anchor_strides):
+        """
+        anchor_sizes: [32, 64, 128, 256, 512]
+        anchor_strides: [8, 16, 32, 64, 128]
+        """
         self.anchor_sizes = anchor_sizes
         self.anchor_strides = anchor_strides
 
     def encode(self, gt_K, gt_3Ds, gt_Rs, gt_Ts, anchors):
+        """
+        encode 3D coordinate to offset relative to anchors
+        anchors: bboxes [x1, y1, x2, y2]    (B, 4)
+        """
         TO_REMOVE = 1  #
         anchors_w = anchors[:, 2] - anchors[:, 0] + TO_REMOVE
         anchors_h = anchors[:, 3] - anchors[:, 1] + TO_REMOVE
@@ -123,6 +151,7 @@ class TargetCoder(object):
         ptx = ptn[:,0,:] / ptn[:,2,:]
         pty = ptn[:,1,:] / ptn[:,2,:]
 
+        # encode to offset
         dx = (ptx - anchors_cx.view(-1, 1)) / anchors_w.view(-1, 1)
         dy = (pty - anchors_cy.view(-1, 1)) / anchors_h.view(-1, 1)
 
@@ -131,6 +160,11 @@ class TargetCoder(object):
         return targets
 
     def decode(self, preds, anchors):
+        """
+        decode preds to according to anchors
+        preds:  (B, 16) 8 x 2 coordination offset
+
+        """
         TO_REMOVE = 1  #
         anchors_w = anchors[:, 2] - anchors[:, 0] + TO_REMOVE
         anchors_h = anchors[:, 3] - anchors[:, 1] + TO_REMOVE
@@ -244,7 +278,13 @@ class AnchorGenerator(nn.Module):
         boxlist.add_field("visibility", inds_inside)
 
     def forward(self, image_list, feature_maps):
-        grid_sizes = [feature_map.shape[-2:] for feature_map in feature_maps]
+        """
+        image only contribute to global size
+        feature 
+        Returns:
+            list[list[BoxList]]: image list --> image --> feature anchors
+        """
+        grid_sizes = [feature_map.shape[-2:] for feature_map in feature_maps]   # (h, w)
         anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
         anchors = []
         for i, (image_height, image_width) in enumerate(image_list.sizes):
@@ -325,7 +365,11 @@ def _whctrs(anchor):
     return w, h, x_ctr, y_ctr
 
 def make_anchor_generator(anchor_sizes, anchor_strides):
-    aspect_ratios = [1.0]
+    """
+    anchor_sizes: [32, 64, 128, 256, 512]
+    anchor_strides: [8, 16, 32, 64, 128]
+    """
+    aspect_ratios = [1.0]   # 1.0
     straddle_thresh = 0
     octave = 2.0
     scales_per_octave = 1
@@ -335,21 +379,27 @@ def make_anchor_generator(anchor_sizes, anchor_strides):
     for size in anchor_sizes:
         per_layer_anchor_sizes = []
         for scale_per_octave in range(scales_per_octave):
-            octave_scale = octave ** (scale_per_octave / float(scales_per_octave))
-            per_layer_anchor_sizes.append(octave_scale * size)
+            octave_scale = octave ** (scale_per_octave / float(scales_per_octave))  # 2
+            per_layer_anchor_sizes.append(octave_scale * size)  # 2xsize
         new_anchor_sizes.append(tuple(per_layer_anchor_sizes))
 
     anchor_generator = AnchorGenerator(
         tuple(new_anchor_sizes), aspect_ratios, anchor_strides, straddle_thresh
-    )
+    )   # nn.Module, needs forward
     return anchor_generator
 
 
 class PoseHead(nn.Module):
     def __init__(self, in_channel, n_class, n_conv, prior):
+        """
+        in_channel: 256
+        n_class: 2
+        n_conv: 4
+        prior: 0.01
+        """
         super(PoseHead, self).__init__()
-        num_classes = n_class - 1
-        num_anchors = 1
+        num_classes = n_class - 1   # only one class
+        num_anchors = 1 # only one anchor
 
         cls_tower = []
         pose_tower = []
@@ -364,7 +414,7 @@ class PoseHead(nn.Module):
                     stride=1,
                     padding=1,
                     bias=True
-                )
+                )   # res x= 1
             )
             cls_tower.append(nn.GroupNorm(32, in_channel))
             # cls_tower.append(nn.BatchNorm2d(in_channel))
@@ -383,8 +433,8 @@ class PoseHead(nn.Module):
             # cls_tower.append(nn.BatchNorm2d(in_channel))
             pose_tower.append(nn.ReLU())
 
-        self.add_module('cls_tower', nn.Sequential(*cls_tower))
-        self.add_module('pose_tower', nn.Sequential(*pose_tower))
+        self.add_module('cls_tower', nn.Sequential(*cls_tower)) # 5xconv
+        self.add_module('pose_tower', nn.Sequential(*pose_tower))   # 5xconv
         self.cls_logits = nn.Conv2d(
             in_channel, num_anchors * num_classes, kernel_size=3, stride=1,
             padding=1
@@ -392,7 +442,7 @@ class PoseHead(nn.Module):
         self.pose_pred = nn.Conv2d(
             in_channel, num_anchors * num_classes * 16, kernel_size=3, stride=1,
             padding=1
-        )
+        )   # 8 offset relative to anchors
 
         # initialization
         for modules in [self.cls_tower, self.pose_tower,
@@ -411,6 +461,15 @@ class PoseHead(nn.Module):
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
+        """
+        feature: len = 5
+        feature[i] --> cls_tower --> logits --> C = num_anchors * num_classes (objectness)
+        feature[i] --> pose_tower --> pose_pred --> scale --> C = num_anchors * num_classes * 16 (8 x 2 points)
+
+        Return:
+            logits: list of objectness score (unnormalized)
+            pose_reg: 8 points
+        """
         logits = []
         pose_reg = []
         centerness = []
@@ -430,28 +489,28 @@ class PoseModule(nn.Module):
     def __init__(self, cfg, backbone):
         super(PoseModule, self).__init__()
 
-        n_class = cfg['DATASETS']['N_CLASS']
-        bbox_json = cfg['DATASETS']['BBOX_FILE']
-        diameters = cfg['DATASETS']['MESH_DIAMETERS']
+        n_class = cfg['DATASETS']['N_CLASS']            # 2
+        bbox_json = cfg['DATASETS']['BBOX_FILE']        # json meta
+        diameters = cfg['DATASETS']['MESH_DIAMETERS']   # 178.46
 
-        n_conv = cfg['MODEL']['N_CONV']
-        prior = cfg['MODEL']['PRIOR']
-        use_higher_levels = cfg['MODEL']['USE_HIGHER_LEVELS']
-        feat_channels = cfg['MODEL']['FEAT_CHANNELS']
-        out_channel = cfg['MODEL']['OUT_CHANNEL']
-        anchor_sizes = cfg['MODEL']['ANCHOR_SIZES']
-        anchor_strides = cfg['MODEL']['ANCHOR_STRIDES']
+        n_conv = cfg['MODEL']['N_CONV']                 # 4
+        prior = cfg['MODEL']['PRIOR']                   # 0.01
+        use_higher_levels = cfg['MODEL']['USE_HIGHER_LEVELS']   # True
+        feat_channels = cfg['MODEL']['FEAT_CHANNELS']   # [0, 0, 256, 512, 1024]
+        out_channel = cfg['MODEL']['OUT_CHANNEL']       # 256
+        anchor_sizes = cfg['MODEL']['ANCHOR_SIZES']     # [32, 64, 128, 256, 512]
+        anchor_strides = cfg['MODEL']['ANCHOR_STRIDES'] # [8, 16, 32, 64, 128]
 
-        internal_K = cfg['INPUT']['INTERNAL_K']
+        internal_K = cfg['INPUT']['INTERNAL_K'] # intrinsic
 
-        positive_num = cfg['SOLVER']['POSITIVE_NUM']
-        positive_lambda = cfg['SOLVER']['POSITIVE_LAMBDA']
-        loss_weight_cls = cfg['SOLVER']['LOSS_WEIGHT_CLS']
-        loss_weight_reg = cfg['SOLVER']['LOSS_WEIGHT_REG']
-        focal_gamma = cfg['SOLVER']['FOCAL_GAMMA']
-        focal_alpha = cfg['SOLVER']['FOCAL_ALPHA']
+        positive_num = cfg['SOLVER']['POSITIVE_NUM']    # 10
+        positive_lambda = cfg['SOLVER']['POSITIVE_LAMBDA']  # 1.0
+        loss_weight_cls = cfg['SOLVER']['LOSS_WEIGHT_CLS']  # 0.01
+        loss_weight_reg = cfg['SOLVER']['LOSS_WEIGHT_REG']  # 0.1
+        focal_gamma = cfg['SOLVER']['FOCAL_GAMMA']          # 2.0
+        focal_alpha = cfg['SOLVER']['FOCAL_ALPHA']          # 0.25
 
-        inference_th = cfg['TEST']['CONFIDENCE_TH']
+        inference_th = cfg['TEST']['CONFIDENCE_TH']         # 0.3
 
         self.backbone = backbone
         if use_higher_levels:
@@ -461,21 +520,21 @@ class PoseModule(nn.Module):
             self.fpn = FPN(feat_channels, out_channel, None)
 
         self.head = PoseHead(out_channel, n_class, n_conv, prior)
-        target_coder = TargetCoder(anchor_sizes, anchor_strides)
+        target_coder = TargetCoder(anchor_sizes, anchor_strides)    # encode and decode offset to global keypoints
         self.loss_evaluator = PoseLoss(
             focal_gamma, focal_alpha, anchor_sizes, anchor_strides, positive_num, positive_lambda,
             loss_weight_cls, loss_weight_reg, internal_K, diameters, target_coder
             )
         self.post_processor = PostProcessor(inference_th, n_class, target_coder, positive_num, positive_lambda)
-        self.anchor_generator = make_anchor_generator(anchor_sizes, anchor_strides)
+        self.anchor_generator = make_anchor_generator(anchor_sizes, anchor_strides) # a list of anchors
 
     def forward(self, images, targets):
         features = self.backbone(images.tensors)
-        features = self.fpn(features)
+        features = self.fpn(features)   # list len = 5
         # features = [features[-1]] # disable FPN and pick up only the deepest features
 
         pred_cls, pred_reg = self.head(features)
-        anchors = self.anchor_generator(images, features)
+        anchors = self.anchor_generator(images, features) # list[list[BoxList]]
  
         if self.training:
             return self._forward_train(pred_cls, pred_reg, targets, anchors)

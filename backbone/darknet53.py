@@ -74,12 +74,12 @@ class DarkNet53(nn.Module):
         Number of classification classes.
     """
     def __init__(self,
-                 channels,
-                 init_block_channels,
-                 alpha=0.1,
-                 in_channels=3,
-                 in_size=(224, 224),
-                 num_classes=1000):
+                 channels: int,
+                 init_block_channels: int,
+                 alpha: float = 0.1,
+                 in_channels: int =3,
+                 in_size: tuple[int] = (224, 224),
+                 num_classes: int = 1000):
         super(DarkNet53, self).__init__()
         self.in_size = in_size
         self.num_classes = num_classes
@@ -90,7 +90,7 @@ class DarkNet53(nn.Module):
             out_channels=init_block_channels,
             activation=nn.LeakyReLU(
                 negative_slope=alpha,
-                inplace=True)))
+                inplace=True))) # res x= 1
         in_channels = init_block_channels
         for i, channels_per_stage in enumerate(channels):
             stage = nn.Sequential()
@@ -128,6 +128,9 @@ class DarkNet53(nn.Module):
                     init.constant_(module.bias, 0)
                     
     def forward(self, x):
+        """
+        Result: list of 5 stages output
+        """
         out1 = self.features.init_block(x)
         out1 = self.features.stage1(out1)
         out2 = self.features.stage2(out1)

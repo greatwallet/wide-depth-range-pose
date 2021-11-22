@@ -11,6 +11,11 @@ import cv2
 import torch
 
 def load_bop_meshes(model_path):
+    """
+    Returns:
+        meshes: list[Trimesh]
+        objID2clsID: dict, objID (original) --> i (0-indexed)
+    """
     # load meshes
     meshFiles = [f for f in os.listdir(model_path) if f.endswith('.ply')]
     meshFiles.sort()
@@ -85,6 +90,14 @@ def draw_pose_axis(cvImg, R, T, bbox, intrinsics, thickness):
     return cvImg
 
 def get_single_bop_annotation(img_path, objID_2_clsID):
+    """
+    Returns:
+        K: camera intrinsic (3, 3)
+        merged_mask: multiple object segmentation, merged_mask == instance_id --> mask; instance_id is not relevant to cls_id or obj_id
+        class_ids: list[int], cls_id
+        rotations: list[np.ndarray (3, 3)] 
+        translations: list[np.ndarray (3, 1)] 
+    """
     # add attributes to function, for fast loading
     if not hasattr(get_single_bop_annotation, "dir_annots"):
         get_single_bop_annotation.dir_annots = {}
