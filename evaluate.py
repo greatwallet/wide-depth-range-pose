@@ -29,7 +29,7 @@ def evaluate(cfg, predictions):
     accuracy_adi_per_depth = []
     accuracy_rep_per_depth = []
 
-    meshes, _ = load_bop_meshes(cfg['DATASETS']['MESH_DIR'])
+    meshes, _ = load_bop_meshes(cfg['DATASETS']['MESH_DIR'], cfg['DATASETS']['OBJ_IDS'])
     meshDiameter = cfg['DATASETS']['MESH_DIAMETERS']
     surfacePts = []
     for ms in meshes:
@@ -38,7 +38,12 @@ def evaluate(cfg, predictions):
         pts = pts[tmp_index]
         surfacePts.append(pts)
 
-    keypoints_3d = load_bbox_3d(cfg['DATASETS']['BBOX_FILE'])
+    # keypoints_3d = load_bbox_3d(cfg['DATASETS']['BBOX_FILE'])
+    keypoints_3d_meta = json.load(open(cfg['DATASETS']['KEYPOINT_FILE'], 'r')) 
+    keypoints_3d = [
+        keypoints_3d_meta[obj_id][cfg['DATASETS']['KEYPOINT_TYPE']]
+        for obj_id in cfg['DATASETS']['OBJ_IDS']
+    ]
     predictions_for_eval = remap_predictions(
         np.array(cfg['INPUT']['INTERNAL_K']).reshape(3,3),
         cfg['INPUT']['INTERNAL_WIDTH'],

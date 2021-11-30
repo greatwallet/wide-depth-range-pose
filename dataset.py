@@ -105,15 +105,33 @@ class BOP_Dataset_v1(Dataset):
     """
     Newly defined BOP dataset
     """
-    def __init__(self, dataDir, keypoint_json, transform, keypoint_type, obj_ids, samples_count=0, training=True):
+    def __init__(
+        self, 
+        dataDir, 
+        keypoint_json, 
+        transform, 
+        keypoint_type, 
+        obj_ids, 
+        split_fpath=None,
+        samples_count=0, 
+        training=True
+    ):
         # List the data directory
         self.img_files = []
-        for scene_dir in os.listdir(dataDir):
-            self.img_files.extend([
-                osp.join(dataDir, scene_dir, "rgb", img_file)
-                for img_file in os.listdir(osp.join(dataDir, scene_dir, "rgb"))
-                if is_img_file(img_file)
-            ])
+        if split_fpath is not None and osp.exists(split_fpath):
+            split_meta = json.load(open(split_fpath, 'r'))
+            for scene_id, img_ids in split_meta.items():
+                self.img_files.extend([
+                    osp.join(dataDir, f'{int(scene_id):06d}', "rgb", f"{img_id:06d}.png")
+                    for img_id in img_ids["train" if training else "test"]
+                ])
+        else:
+            for scene_dir in os.listdir(dataDir):
+                self.img_files.extend([
+                    osp.join(dataDir, scene_dir, "rgb", img_file)
+                    for img_file in os.listdir(osp.join(dataDir, scene_dir, "rgb"))
+                    if is_img_file(img_file)
+                ])
 
         rawSampleCount = len(self.img_files)
         if training and samples_count > 0:
@@ -194,12 +212,16 @@ class BOP_Dataset_v1(Dataset):
 
         # transformation
         img, target = self.transformer(img, target)
-        target = target.remove_invalids(min_area=10)  # remove invalid object with limited area
+        # TODO
+        # target = target.remove_invalids(min_area=10)  # remove invalid object with limited area
+        target = target.remove_invalids(min_area=100)  # remove invalid object with limited area
         if self.training and len(target) == 0:
             # print("WARNING: skipped a sample without any targets")
             return None
 
         return img, target, meta_info
+
+
 
 
 class ImageList:

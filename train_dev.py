@@ -73,8 +73,6 @@ def valid(cfg, epoch, loader, model, device, prefix, logger=None):
 
     preds = {}
 
-    meshes, _ = load_bop_meshes(cfg['DATASETS']['MESH_DIR'])
-
     for idx, (images, targets, meta_infos) in pbar:
         model.zero_grad()
 
@@ -89,7 +87,7 @@ def valid(cfg, epoch, loader, model, device, prefix, logger=None):
             name_prefix = prefix + "_" + imgpath.replace(os.sep, '_').replace('.', '') + '_' + os.path.splitext(imgname)[0]
 
             rawImg, visImg, gtImg = visualize_pred(images.tensors[bIdx], targets[bIdx], pred[bIdx], 
-                cfg['INPUT']['PIXEL_MEAN'],  cfg['INPUT']['PIXEL_STD'], meshes)
+                cfg['INPUT']['PIXEL_MEAN'],  cfg['INPUT']['PIXEL_STD'])
             # cv2.imwrite(cfg['RUNTIME']['WORKING_DIR'] + name_prefix + '.png', rawImg)
             cv2.imwrite(cfg['RUNTIME']['WORKING_DIR'] + name_prefix + '_pred.png', visImg)
             cv2.imwrite(cfg['RUNTIME']['WORKING_DIR'] + name_prefix + '_gt.png', gtImg)
@@ -259,17 +257,24 @@ if __name__ == '__main__':
             transform=train_trans,
             keypoint_type=cfg["DATASETS"]["KEYPOINT_TYPE"],
             obj_ids=cfg["DATASETS"]["OBJ_IDS"],
+            split_fpath=cfg["DATASETS"]["TRAIN_SPLIT_FPATH"],
             samples_count=cfg['SOLVER']['STEPS_PER_EPOCH'] * cfg['SOLVER']['IMS_PER_BATCH'],
             training=True
         )
         for dataDir in cfg["DATASETS"]["TRAIN"]   
     ])
+    ##debug
+    # img, _, meta_info = train_set[0]
+    # img_path = meta_info['path']
+    # img = (img - img.min()) / (img.max() - img.min())
+
     valid_sets= {
         dataDir.split('/')[-2]: BOP_Dataset_v1(
             dataDir=dataDir,
             keypoint_json=cfg["DATASETS"]["KEYPOINT_FILE"],
             keypoint_type=cfg["DATASETS"]["KEYPOINT_TYPE"],
             obj_ids=cfg["DATASETS"]["OBJ_IDS"],
+            split_fpath=cfg["DATASETS"]["VAL_SPLIT_FPATH"],
             transform=valid_trans,
             training=False
         )
@@ -368,10 +373,14 @@ if __name__ == '__main__':
     with open(cfg['RUNTIME']['WORKING_DIR'] + 'cfg.json', 'w') as f:
         json.dump(cfg, f, indent=4, sort_keys=True)
 
+    # For debug
+    for valset_name, valid_loader in valid_loaders.items():
+        valid(cfg, -1, valid_loader, model, device, prefix=valset_name, logger=logger)
+
     for epoch in range(start_epoch, max_epoch):
         train(cfg, epoch, max_epoch, train_loader, model, optimizer, scheduler_batch, device, logger=logger)
 
-        for valset_name, valid_loader in valid_loaders:
+        for valset_name, valid_loader in valid_loaders.items():
             valid(cfg, epoch, valid_loader, model, device, prefix=valset_name, logger=logger)
 
         if get_rank() == 0:

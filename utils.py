@@ -177,7 +177,7 @@ def get_single_bop_annotation(img_path, objID_2_clsID, obj_ids=None):
     
     return K, merged_mask, class_ids, rotations, translations
     
-def visualize_pred(img, gt, pred, mean, std, meshes):
+def visualize_pred(img, gt, pred, mean, std):
     cvImg = img.to('cpu').numpy().transpose(1,2,0)
     # de-normalize
     cvImg = cvImg * (np.array(std).reshape(1,1,3) * 255)
